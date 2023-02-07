@@ -7,6 +7,7 @@
  */
 
 #include <alsa/asoundlib.h>
+#include <lame.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,11 +18,16 @@ main(int argc, char *argv[])
 	int i;
 	int err;
 	char *buffer;
-	int buffer_frames = 128;
+	const int buffer_frames = 256;
 	unsigned int rate = 44100;
 	snd_pcm_t *capture_handle;
 	snd_pcm_hw_params_t *hw_params;
 	snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
+	FILE *pcm_file = fopen("file.pcm", "wb");
+
+	const int mp3_size = 1024;
+	unsigned char *mp3_buffer;
+	FILE *mp3_file = fopen("file.mp3", "wb");
 
 	(void)argc;
 
@@ -109,11 +115,21 @@ main(int argc, char *argv[])
 
 	fprintf(stdout, "audio interface prepared\n");
 
-	buffer = malloc((size_t)(128 * snd_pcm_format_width(format) / 8 * 2));
+	buffer = malloc(
+	    (size_t)(buffer_frames * snd_pcm_format_width(format) / 8 * 2));
+	mp3_buffer = malloc(mp3_size);
 
-	fprintf(stdout, "buffer allocated\n");
+	fprintf(stdout, "buffers allocated\n");
 
-	for (i = 0; i < 10; ++i) {
+	lame_t lame = lame_init();
+	lame_set_in_samplerate(lame, (int)rate);
+	lame_set_VBR(lame, vbr_default);
+	lame_init_params(lame);
+
+	fprintf(stdout, "LAME configured\n");
+	int wr;
+
+	for (i = 0; i < 1024; ++i) {
 		if ((err = (int)snd_pcm_readi(capture_handle, buffer,
 					      (size_t)buffer_frames)) !=
 		    buffer_frames) {
@@ -122,12 +138,31 @@ main(int argc, char *argv[])
 				err, snd_strerror(err));
 			exit(1);
 		}
+		fwrite(buffer,
+		       (size_t)(buffer_frames * snd_pcm_format_width(format) /
+				8 * 2),
+		       1, pcm_file);
 		fprintf(stdout, "read %d done\n", i);
+
+		wr = lame_encode_buffer_interleaved(
+		    lame, (short *)buffer, buffer_frames, mp3_buffer, mp3_size);
+		fwrite(mp3_buffer, (size_t)wr, 1, mp3_file);
+
+		fprintf(stdout, "mp3 write: %i\n", wr);
+		fflush(stdout);
 	}
 
-	free(buffer);
+	wr = lame_encode_flush(lame, mp3_buffer, mp3_size);
+	fwrite(mp3_buffer, (size_t)wr, 1, mp3_file);
 
-	fprintf(stdout, "buffer freed\n");
+	lame_close(lame);
+	fclose(mp3_file);
+	fclose(pcm_file);
+
+	free(buffer);
+	free(mp3_buffer);
+
+	fprintf(stdout, "buffers freed\n");
 
 	snd_pcm_close(capture_handle);
 	fprintf(stdout, "audio interface closed\n");
