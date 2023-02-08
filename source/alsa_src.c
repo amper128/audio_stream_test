@@ -34,7 +34,8 @@ main(void)
 	ss.rate = rate;
 	int *err = 0;
 	char *data;
-	size_t data_size = pa_frame_size(&ss) * FRAMES_COUNT;
+	size_t frame_size = pa_frame_size(&ss);
+	size_t data_size = frame_size * FRAMES_COUNT;
 
 	const int mp3_size = 8192;
 	unsigned char *mp3_buffer;
@@ -80,14 +81,36 @@ main(void)
 	lame_set_VBR(lame, vbr_default);
 	lame_init_params(lame);
 
+	hip_t dec = hip_decode_init();
+
+	short int pcm_buffer1[data_size * 4];
+	short int pcm_buffer2[data_size * 4];
+	short int pcm_buffer_i[data_size * 4];
+
 	while (1) {
 		int wr;
+		int d;
+
 		pa_simple_read(rec, data, data_size, err);
 
 		wr = lame_encode_buffer_interleaved(
 		    lame, (short *)data, FRAMES_COUNT, mp3_buffer, mp3_size);
 		if (wr > 0) {
 			fwrite(mp3_buffer, (size_t)wr, 1, mp3_file);
+
+			d = hip_decode(dec, mp3_buffer, (size_t)wr, pcm_buffer1,
+				       pcm_buffer2);
+			if (d > 0) {
+				int i;
+				for (i = 0U; i < d; i++) {
+					pcm_buffer_i[i * 2] = pcm_buffer1[i];
+					pcm_buffer_i[i * 2 + 1] =
+					    pcm_buffer2[i];
+				}
+
+				pa_simple_write(play, pcm_buffer_i,
+						((size_t)d * frame_size), err);
+			}
 		}
 
 		// pa_simple_write(play, data, data_size, err);
