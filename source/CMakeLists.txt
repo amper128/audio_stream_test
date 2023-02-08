@@ -10,7 +10,7 @@ file(GLOB_RECURSE app_headers "include/*.h")
 file(GLOB_RECURSE global_headers "${PROJECT_SOURCE_DIR}/include/*.h")
 
 add_executable(audio_src
-	alsa_src.c
+	capture.c
 	${app_headers}
 	${global_headers}
 	)
