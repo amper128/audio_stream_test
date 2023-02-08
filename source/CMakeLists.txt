@@ -25,4 +25,5 @@ target_include_directories(audio_src
 target_link_libraries(audio_src
 		${ALSA_LIBRARIES}
 		${LAME_LIBRARIES}
+		-lpulse -lpulse-simple
 	)
