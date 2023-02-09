@@ -27,3 +27,22 @@ target_link_libraries(audio_src
 		${LAME_LIBRARIES}
 		-lpulse -lpulse-simple
 	)
+
+add_executable(audio_play
+	play.c
+	${app_headers}
+	${global_headers}
+	)
+
+target_include_directories(audio_play
+	PRIVATE
+		include
+		${ALSA_INCLUDE_DIRS}
+		${LAME_INCLUDE_DIRS}
+	)
+
+target_link_libraries(audio_play
+		${ALSA_LIBRARIES}
+		${LAME_LIBRARIES}
+		-lpulse -lpulse-simple
+	)

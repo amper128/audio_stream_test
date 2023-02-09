@@ -1,70 +1,82 @@
 /**
- * @file alsa_src.c
+ * @file capture.c
  * @author Алексей Хохлов <root@amper.me>
  * @copyright WTFPL License
  * @date 2023
  * @brief Захват аудио
  */
 
-#include <alsa/asoundlib.h>
+#include <arpa/inet.h>
 #include <lame.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-
-#include <pulse/error.h>
 #include <pulse/simple.h>
-
-static unsigned int rate = 48000;
-#define NSTREAMS 4
-#define SINE_HZ 440
-#define SAMPLE_HZ 48000
+#include <stdlib.h>
+#include <string.h>
 
 #define FRAMES_COUNT (256U)
+#define NSTREAMS (64U)
 
 int
-main(void)
+main(int argc, char *argv[])
 {
-	pa_simple *play;
+	char *addr = NULL;
+	uint16_t port = 0U;
+	int rate = 44100;
+
+	int c;
+	while ((c = getopt(argc, argv, "s:p:r:")) != -1) {
+		char *end;
+		switch (c) {
+		case 's':
+			addr = optarg;
+			break;
+
+		case 'p':
+			port = (uint16_t)strtoul(optarg, &end, 10);
+			break;
+
+		case 'r':
+			rate = (int)strtol(optarg, &end, 10);
+			break;
+
+		default:
+			return -1;
+		}
+	}
+
+	if (port == 0) {
+		return -1;
+	}
+
 	pa_simple *rec;
 	pa_sample_spec ss;
 
 	ss.format = PA_SAMPLE_S16LE;
 	ss.channels = 2;
-	ss.rate = rate;
+	ss.rate = (uint32_t)rate;
 	int *err = 0;
-	char *data;
+	short *data;
 	size_t frame_size = pa_frame_size(&ss);
 	size_t data_size = frame_size * FRAMES_COUNT;
 
 	const int mp3_size = 8192;
 	unsigned char *mp3_buffer;
-	FILE *mp3_file = fopen("file.mp3", "wb");
 
-	static const pa_buffer_attr buffer_attr = {
-	    .maxlength = SAMPLE_HZ * sizeof(float) *
-			 NSTREAMS, /* exactly space for the entire play time */
-	    .tlength = (uint32_t)-1,
-	    .prebuf = 0, /* Setting prebuf to 0 guarantees us the streams will
-			    run synchronously, no matter what */
-	    .minreq = (uint32_t)-1,
-	    .fragsize = 0};
+	static pa_buffer_attr buffer_attr;
+
+	/* exactly space for the entire play time */
+	buffer_attr.maxlength =
+	    (uint32_t)((size_t)rate * sizeof(float) * NSTREAMS);
+	buffer_attr.tlength = (uint32_t)-1;
+	/* Setting prebuf to 0 guarantees us the streams will run synchronously,
+	 * no matter what */
+	buffer_attr.prebuf = 0;
+	buffer_attr.minreq = (uint32_t)-1;
+	buffer_attr.fragsize = 0;
 
 	data = malloc(data_size);
 
-	play = pa_simple_new(NULL,     // Use the default server.
-			     "Fooapp", // Our application's name.
-			     PA_STREAM_PLAYBACK,
-			     NULL,	   // Use the default device.
-			     "Music",	   // Description of our stream.
-			     &ss,	   // Our sample format.
-			     NULL,	   // Use default channel map
-			     &buffer_attr, // Use default buffering attributes.
-			     NULL	   // Ignore error code.
-	);
-
-	rec = pa_simple_new(NULL,     // Use the default server.
-			    "Fooapp", // Our application's name.
+	rec = pa_simple_new(NULL,	    // Use the default server.
+			    "Test capture", // Our application's name.
 			    PA_STREAM_RECORD,
 			    NULL,	  // Use the default device.
 			    "Music",	  // Description of our stream.
@@ -77,47 +89,49 @@ main(void)
 	mp3_buffer = malloc(mp3_size);
 
 	lame_t lame = lame_init();
-	lame_set_in_samplerate(lame, (int)rate);
-	lame_set_VBR(lame, vbr_default);
+	lame_set_in_samplerate(lame, rate);
+	lame_set_VBR(lame, vbr_off);
+	lame_set_brate(lame, 320);
+	lame_set_force_short_blocks(lame, 1);
 	lame_init_params(lame);
 
-	hip_t dec = hip_decode_init();
+	/* инициализируем UDP сокет */
+	struct sockaddr_in si_other;
+	int s, slen = sizeof(si_other);
 
-	short int pcm_buffer1[data_size * 4];
-	short int pcm_buffer2[data_size * 4];
-	short int pcm_buffer_i[data_size * 4];
+	if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+		fprintf(stderr, "cannot create socket\n");
+		exit(1);
+	}
+
+	memset((char *)&si_other, 0, sizeof(si_other));
+	si_other.sin_family = AF_INET;
+	si_other.sin_port = htons(port);
+
+	if (inet_aton(addr, &si_other.sin_addr) == 0) {
+		fprintf(stderr, "inet_aton() failed\n");
+		exit(1);
+	}
 
 	while (1) {
 		int wr;
-		int d;
 
 		pa_simple_read(rec, data, data_size, err);
 
-		wr = lame_encode_buffer_interleaved(
-		    lame, (short *)data, FRAMES_COUNT, mp3_buffer, mp3_size);
+		wr = lame_encode_buffer_interleaved(lame, data, FRAMES_COUNT,
+						    mp3_buffer, mp3_size);
 		if (wr > 0) {
-			fwrite(mp3_buffer, (size_t)wr, 1, mp3_file);
-
-			d = hip_decode(dec, mp3_buffer, (size_t)wr, pcm_buffer1,
-				       pcm_buffer2);
-			if (d > 0) {
-				int i;
-				for (i = 0U; i < d; i++) {
-					pcm_buffer_i[i * 2] = pcm_buffer1[i];
-					pcm_buffer_i[i * 2 + 1] =
-					    pcm_buffer2[i];
-				}
-
-				pa_simple_write(play, pcm_buffer_i,
-						((size_t)d * frame_size), err);
+			/* UDP send */
+			if (sendto(s, mp3_buffer, (size_t)wr, 0,
+				   (struct sockaddr *)&si_other,
+				   (socklen_t)slen) == -1) {
+				fprintf(stderr, "cannot send to socket\n");
+				break;
 			}
 		}
-
-		// pa_simple_write(play, data, data_size, err);
 	}
 
 	pa_simple_free(rec);
-	pa_simple_free(play);
 
 	free(data);
 
