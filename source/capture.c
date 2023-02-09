@@ -7,7 +7,7 @@
  */
 
 #include <arpa/inet.h>
-#include <lame.h>
+#include <lame/lame.h>
 #include <pulse/simple.h>
 #include <stdlib.h>
 #include <string.h>

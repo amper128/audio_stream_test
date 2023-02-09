@@ -2,9 +2,6 @@
 # sources
 #
 
-find_package(PkgConfig)
-pkg_search_module(LAME REQUIRED lame)
-
 file(GLOB_RECURSE app_headers "include/*.h")
 file(GLOB_RECURSE global_headers "${PROJECT_SOURCE_DIR}/include/*.h")
 
@@ -17,12 +14,10 @@ add_executable(audio_src
 target_include_directories(audio_src
 	PRIVATE
 		include
-		${LAME_INCLUDE_DIRS}
 	)
 
 target_link_libraries(audio_src
-		${LAME_LIBRARIES}
-		-lpulse -lpulse-simple
+		-lpulse -lpulse-simple -lmp3lame
 	)
 
 add_executable(audio_play
@@ -34,10 +29,8 @@ add_executable(audio_play
 target_include_directories(audio_play
 	PRIVATE
 		include
-		${LAME_INCLUDE_DIRS}
 	)
 
 target_link_libraries(audio_play
-		${LAME_LIBRARIES}
-		-lpulse -lpulse-simple
+		-lpulse -lpulse-simple -lmp3lame
 	)
