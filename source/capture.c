@@ -21,9 +21,10 @@ main(int argc, char *argv[])
 	char *addr = NULL;
 	uint16_t port = 0U;
 	int rate = 44100;
+	int bitrate = 192;
 
 	int c;
-	while ((c = getopt(argc, argv, "s:p:r:")) != -1) {
+	while ((c = getopt(argc, argv, "s:p:r:b:")) != -1) {
 		char *end;
 		switch (c) {
 		case 's':
@@ -36,6 +37,10 @@ main(int argc, char *argv[])
 
 		case 'r':
 			rate = (int)strtol(optarg, &end, 10);
+			break;
+
+		case 'b':
+			bitrate = (int)strtol(optarg, &end, 10);
 			break;
 
 		default:
@@ -91,7 +96,7 @@ main(int argc, char *argv[])
 	lame_t lame = lame_init();
 	lame_set_in_samplerate(lame, rate);
 	lame_set_VBR(lame, vbr_off);
-	lame_set_brate(lame, 320);
+	lame_set_brate(lame, bitrate);
 	lame_set_force_short_blocks(lame, 1);
 	lame_init_params(lame);
 

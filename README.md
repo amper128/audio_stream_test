@@ -15,7 +15,7 @@ cmake ../
 
 ###### How to stream audio:
 ```
-./audio_src -s 127.0.0.1 -p 1234 -r 44100
+./audio_src -s 127.0.0.1 -p 1234 -r 44100 -b 320
 ```
 
 ###### How to receive audio stream:
@@ -27,3 +27,4 @@ cmake ../
  - -s - ip address to streaming
  - -p - UDP port
  - -r - audio rate
+ - -b - mp3 bitrate
