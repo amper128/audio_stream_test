@@ -3,7 +3,6 @@
 #
 
 find_package(PkgConfig)
-pkg_search_module(ALSA REQUIRED alsa)
 pkg_search_module(LAME REQUIRED lame)
 
 file(GLOB_RECURSE app_headers "include/*.h")
@@ -18,12 +17,10 @@ add_executable(audio_src
 target_include_directories(audio_src
 	PRIVATE
 		include
-		${ALSA_INCLUDE_DIRS}
 		${LAME_INCLUDE_DIRS}
 	)
 
 target_link_libraries(audio_src
-		${ALSA_LIBRARIES}
 		${LAME_LIBRARIES}
 		-lpulse -lpulse-simple
 	)
@@ -37,12 +34,10 @@ add_executable(audio_play
 target_include_directories(audio_play
 	PRIVATE
 		include
-		${ALSA_INCLUDE_DIRS}
 		${LAME_INCLUDE_DIRS}
 	)
 
 target_link_libraries(audio_play
-		${ALSA_LIBRARIES}
 		${LAME_LIBRARIES}
 		-lpulse -lpulse-simple
 	)
