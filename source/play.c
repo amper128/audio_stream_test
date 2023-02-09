@@ -8,6 +8,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <lame/lame.h>
 #include <pulse/simple.h>
 #include <stdlib.h>
@@ -51,9 +52,9 @@ main(int argc, char *argv[])
 	ss.rate = (uint32_t)rate;
 	int *err = 0;
 	size_t frame_size = pa_frame_size(&ss);
-	size_t data_size = frame_size * 8192;
+	size_t data_size = frame_size * 8192U;
 
-	const int mp3_size = 8192;
+	const size_t mp3_size = 8192U;
 	unsigned char *mp3_buffer;
 
 	static pa_buffer_attr buffer_attr;

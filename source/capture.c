@@ -7,6 +7,7 @@
  */
 
 #include <arpa/inet.h>
+#include <getopt.h>
 #include <lame/lame.h>
 #include <pulse/simple.h>
 #include <stdlib.h>
@@ -63,7 +64,7 @@ main(int argc, char *argv[])
 	size_t frame_size = pa_frame_size(&ss);
 	size_t data_size = frame_size * FRAMES_COUNT;
 
-	const int mp3_size = 8192;
+	const size_t mp3_size = 8192U;
 	unsigned char *mp3_buffer;
 
 	static pa_buffer_attr buffer_attr;
@@ -139,6 +140,7 @@ main(int argc, char *argv[])
 	pa_simple_free(rec);
 
 	free(data);
+	free(mp3_buffer);
 
 	return 0;
 }
