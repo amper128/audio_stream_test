@@ -11,16 +11,17 @@ git clone && cd cloned_dir
 mkdir build
 cd build
 cmake ../
+make
 ```
 
 ###### How to stream audio:
 ```
-./audio_src -s 127.0.0.1 -p 1234 -r 44100 -b 320
+./source/audio_src -s 127.0.0.1 -p 1234 -r 44100 -b 320
 ```
 
 ###### How to receive audio stream:
 ```
-./audio_play -p 1234 -r 44100 -B 2
+./source/audio_play -p 1234 -r 44100 -B 2
 ```
 
 ###### Options:
