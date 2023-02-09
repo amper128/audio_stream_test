@@ -20,7 +20,7 @@ cmake ../
 
 ###### How to receive audio stream:
 ```
-./audio_play -p 1234 -r 44100
+./audio_play -p 1234 -r 44100 -B 2
 ```
 
 ###### Options:
@@ -28,3 +28,4 @@ cmake ../
  - -p - UDP port
  - -r - audio rate
  - -b - mp3 bitrate
+ - -B - pulseaudio prebuf size, default is 2; increase it if sound crackling

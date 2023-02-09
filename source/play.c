@@ -22,9 +22,10 @@ main(int argc, char *argv[])
 {
 	uint16_t port = 0U;
 	int rate = 44100;
+	uint32_t prebuf = 2U;
 
 	int c;
-	while ((c = getopt(argc, argv, "p:r:")) != -1) {
+	while ((c = getopt(argc, argv, "p:r:B:")) != -1) {
 		char *end;
 		switch (c) {
 		case 'p':
@@ -33,6 +34,10 @@ main(int argc, char *argv[])
 
 		case 'r':
 			rate = (int)strtol(optarg, &end, 10);
+			break;
+
+		case 'B':
+			prebuf = strtoul(optarg, &end, 10);
 			break;
 
 		default:
@@ -63,7 +68,7 @@ main(int argc, char *argv[])
 	buffer_attr.maxlength =
 	    (uint32_t)((size_t)rate * sizeof(float) * NSTREAMS);
 	buffer_attr.tlength = (uint32_t)-1;
-	buffer_attr.prebuf = 2;
+	buffer_attr.prebuf = prebuf;
 	buffer_attr.minreq = (uint32_t)-1;
 	buffer_attr.fragsize = 0;
 
