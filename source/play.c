@@ -16,7 +16,7 @@
 #include <string.h>
 #include <sys/poll.h>
 
-#define NSTREAMS (64U)
+#define NSTREAMS (16U)
 #define NCHANNELS (2U)
 #define BUFSIZE (8192U)
 
