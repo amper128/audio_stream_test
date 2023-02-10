@@ -10,59 +10,37 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <lame/lame.h>
+#include <opus/opus.h>
 #include <pulse/simple.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/poll.h>
 
 #define NSTREAMS (64U)
+#define NCHANNELS (2U)
+#define BUFSIZE (8192U)
 
-int
-main(int argc, char *argv[])
+typedef enum {
+	CODEC_MP3, /* use lame */
+	CODEC_OPUS /* use opus */
+} codec_type_t;
+
+typedef struct {
+	void *decoder_p;
+	codec_type_t codec_type;
+} decoder_desc_t;
+
+static pa_simple *
+init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
 {
-	uint16_t port = 0U;
-	int rate = 44100;
-	uint32_t prebuf = 2U;
-
-	int c;
-	while ((c = getopt(argc, argv, "p:r:B:")) != -1) {
-		char *end;
-		switch (c) {
-		case 'p':
-			port = (uint16_t)strtoul(optarg, &end, 10);
-			break;
-
-		case 'r':
-			rate = (int)strtol(optarg, &end, 10);
-			break;
-
-		case 'B':
-			prebuf = strtoul(optarg, &end, 10);
-			break;
-
-		default:
-			return -1;
-		}
-	}
-
-	if (port == 0) {
-		return -1;
-	}
-
+	static pa_buffer_attr buffer_attr;
 	pa_simple *play;
+
 	pa_sample_spec ss;
 
-	ss.format = PA_SAMPLE_S16LE;
+	ss.format = format;
 	ss.channels = 2;
 	ss.rate = (uint32_t)rate;
-	int *err = 0;
-	size_t frame_size = pa_frame_size(&ss);
-	size_t data_size = frame_size * 8192U;
-
-	const size_t mp3_size = 8192U;
-	unsigned char *mp3_buffer;
-
-	static pa_buffer_attr buffer_attr;
 
 	/* exactly space for the entire play time */
 	buffer_attr.maxlength =
@@ -83,17 +61,140 @@ main(int argc, char *argv[])
 			     NULL	   // Ignore error code.
 	);
 
-	mp3_buffer = malloc(mp3_size);
+	if (play == NULL) {
+		fprintf(stderr, "cannot create pulseaudio stream\n");
+		exit(1);
+	}
 
-	hip_t dec = hip_decode_init();
+	return play;
+}
 
-	short int *pcm_buffer1;
-	short int *pcm_buffer2;
-	short int *pcm_buffer_i;
+static decoder_desc_t *
+init_decoder(int rate, codec_type_t codec)
+{
+	switch (codec) {
+	default:
+	case CODEC_MP3: {
+		hip_t dec = hip_decode_init();
+		decoder_desc_t *result = malloc(sizeof(decoder_desc_t));
+		result->codec_type = codec;
+		result->decoder_p = dec;
+		return result;
+	}
+	case CODEC_OPUS: {
+		OpusDecoder *opus;
+		int err = 0;
+		/* Create a new decoder state. */
+		opus = opus_decoder_create(rate, 2, &err);
+		if (err < 0) {
+			fprintf(stderr, "failed to create decoder: %s\n",
+				opus_strerror(err));
+			exit(1);
+		}
+		decoder_desc_t *result = malloc(sizeof(decoder_desc_t));
+		result->codec_type = codec;
+		result->decoder_p = opus;
+		return result;
+	}
+	}
+}
 
-	pcm_buffer1 = malloc(data_size * 4);
-	pcm_buffer2 = malloc(data_size * 4);
-	pcm_buffer_i = malloc(data_size * 4);
+static void
+free_decoder(decoder_desc_t *decoder)
+{
+	free(decoder->decoder_p);
+	free(decoder);
+}
+
+static int
+decode_buffer(decoder_desc_t *decoder, uint8_t *buffer, size_t in_size,
+	      short *out, size_t out_max)
+{
+	int decoded;
+
+	switch (decoder->codec_type) {
+	default:
+	case CODEC_MP3: {
+		hip_t hip = (hip_t)decoder->decoder_p;
+		short pcm_l[BUFSIZE];
+		short pcm_r[BUFSIZE];
+
+		decoded = hip_decode(hip, buffer, in_size, pcm_l, pcm_r);
+		if (decoded > 0) {
+			/* convert to interleaved format */
+			size_t i;
+			for (i = 0U; (i < (size_t)decoded) && (i < BUFSIZE);
+			     i++) {
+				out[i * 2] = pcm_l[i];
+				out[i * 2 + 1] = pcm_r[i];
+			}
+		}
+	} break;
+
+	case CODEC_OPUS: {
+		OpusDecoder *opus = decoder->decoder_p;
+
+		decoded = opus_decode(opus, buffer, (opus_int32)in_size, out,
+				      (int)out_max, 0);
+		if (decoded < 0) {
+			fprintf(stderr, "decoder failed: %s\n",
+				opus_strerror(decoded));
+			return EXIT_FAILURE;
+		}
+	} break;
+	}
+
+	return decoded;
+}
+
+int
+main(int argc, char *argv[])
+{
+	uint16_t port = 0U;
+	int rate = 48000;
+	uint32_t prebuf = 2U;
+	codec_type_t codec = CODEC_OPUS;
+
+	int c;
+	while ((c = getopt(argc, argv, "p:r:B:")) != -1) {
+		char *end;
+		switch (c) {
+		case 'p':
+			port = (uint16_t)strtoul(optarg, &end, 10);
+			break;
+
+		case 'r':
+			rate = (int)strtol(optarg, &end, 10);
+			break;
+
+		case 'B':
+			prebuf = (uint32_t)strtoul(optarg, &end, 10);
+			break;
+
+		default:
+			return -1;
+		}
+	}
+
+	if (port == 0) {
+		return -1;
+	}
+
+	pa_simple *play = init_playback(rate, PA_SAMPLE_S16LE, prebuf);
+	int err = 0;
+	size_t frame_size = pa_sample_size_of_format(PA_SAMPLE_S16LE);
+	size_t data_size = frame_size * 8192U;
+
+	const size_t input_maxsize = 1024U;
+	unsigned char *input_buffer;
+
+	input_buffer = malloc(input_maxsize);
+
+	decoder_desc_t *decoder = init_decoder(rate, codec);
+
+	short int *pcm_buffer;
+
+	pcm_buffer = malloc(data_size);
 
 	/* UDP init */
 	struct sockaddr_in sockaddr;
@@ -142,29 +243,20 @@ main(int argc, char *argv[])
 		}
 
 		ssize_t data_len =
-		    recvfrom(sock, mp3_buffer, mp3_size, 0,
+		    recvfrom(sock, input_buffer, input_maxsize, 0,
 			     (struct sockaddr *)&sockaddr, &slen);
 		if (data_len > 0) {
-			int d;
+			int decoded;
 
-			mp3data_struct mp3data;
-
-			d = hip_decode_headers(dec, mp3_buffer,
-					       (size_t)data_len, pcm_buffer1,
-					       pcm_buffer2, &mp3data);
-			if (d > 0) {
-				/* convert l+r buffers to interleaved */
-				int i;
-				for (i = 0U; i < d; i++) {
-					pcm_buffer_i[i * 2] = pcm_buffer1[i];
-					pcm_buffer_i[i * 2 + 1] =
-					    pcm_buffer2[i];
-				}
-
-				i = pa_simple_write(play, pcm_buffer_i,
-						    ((size_t)d * frame_size),
-						    err);
-				if (i < 0) {
+			decoded = decode_buffer(decoder, input_buffer,
+						(size_t)data_len, pcm_buffer,
+						BUFSIZE);
+			if (decoded > 0) {
+				decoded = pa_simple_write(
+				    play, pcm_buffer,
+				    ((size_t)decoded * frame_size * NCHANNELS),
+				    &err);
+				if (decoded < 0) {
 					fprintf(stderr, "pa_error\n");
 				}
 			}
@@ -173,10 +265,10 @@ main(int argc, char *argv[])
 
 	pa_simple_free(play);
 
-	free(mp3_buffer);
-	free(pcm_buffer1);
-	free(pcm_buffer2);
-	free(pcm_buffer_i);
+	free(input_buffer);
+	free(pcm_buffer);
+
+	free_decoder(decoder);
 
 	return 0;
 }

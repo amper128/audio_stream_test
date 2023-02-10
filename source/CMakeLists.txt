@@ -18,7 +18,7 @@ target_include_directories(audio_src
 	)
 
 target_link_libraries(audio_src
-		-lpulse -lpulse-simple -lmp3lame
+		-lpulse -lpulse-simple -lmp3lame -lopus
 	)
 
 #recevie and play
@@ -34,7 +34,7 @@ target_include_directories(audio_play
 	)
 
 target_link_libraries(audio_play
-		-lpulse -lpulse-simple -lmp3lame
+		-lpulse -lpulse-simple -lmp3lame -lopus
 	)
 
 #latency measure
@@ -50,5 +50,5 @@ target_include_directories(latency_measure
 	)
 
 target_link_libraries(latency_measure
-		-lpulse -lpulse-simple -lmp3lame
+		-lpulse -lpulse-simple -lmp3lame -lopus
 	)
