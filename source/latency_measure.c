@@ -77,7 +77,7 @@ main(void)
 
 	ss.format = PA_SAMPLE_S16LE;
 	ss.channels = 2;
-	ss.rate = rate;
+	ss.rate = (uint32_t)rate;
 
 	int16_t *data;
 	size_t frame_size = pa_frame_size(&ss);
@@ -121,7 +121,7 @@ main(void)
 			     NULL	   // Ignore error code.
 	);
 
-	encoded_buffer = malloc(encoded_size);
+	encoded_buffer = malloc((size_t)encoded_size);
 
 	int16_t *pcm_buffer1 = calloc(data_size * 4, 1);
 #if (USE_MP3 == 1)
