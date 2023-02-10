@@ -73,4 +73,3 @@ string (REPLACE ";" " " COMPILER_FLAGS "${COMPILER_FLAGS}")
 set(CMAKE_C_FLAGS ${COMPILER_FLAGS})
 
 add_subdirectory(source)
-#add_subdirectory(playback)
