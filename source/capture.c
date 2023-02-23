@@ -11,22 +11,34 @@
 #include <lame/lame.h>
 #include <opus/opus.h>
 #include <pulse/simple.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <streaming_shared.h>
 
 #define FRAMES_COUNT (120U)
 #define NSTREAMS (64U)
 #define NCHANNELS (2U)
 
-typedef enum {
-	CODEC_MP3, /* use lame */
-	CODEC_OPUS /* use opus */
-} codec_type_t;
+#define MAX_PACKET_SIZE (1400U)
+#define MAX_DATA_SIZE (MAX_PACKET_SIZE - sizeof(packet_header_t))
 
 typedef struct {
 	void *encoder_p;
 	codec_type_t codec_type;
 } encoder_desc_t;
+
+static int do_capture = 1;
+static uint32_t packet_id = 0U;
+
+static void
+sigfunc(int sig)
+{
+	if (sig == SIGINT) {
+		do_capture = 0;
+	}
+}
 
 static pa_simple *
 init_capture(int rate, pa_sample_format_t format)
@@ -174,6 +186,21 @@ main(int argc, char *argv[])
 	int kbitrate = 320;
 	codec_type_t codec = CODEC_OPUS;
 
+	union {
+		uint8_t u8[MAX_PACKET_SIZE];
+		struct {
+			packet_header_t hdr;
+			stream_start_t meta;
+		} start;
+		struct {
+			packet_header_t hdr;
+		} end;
+		struct {
+			packet_header_t hdr;
+			uint8_t data[];
+		} data;
+	} packet;
+
 	int c;
 	while ((c = getopt(argc, argv, "s:p:r:b:")) != -1) {
 		char *end;
@@ -202,6 +229,8 @@ main(int argc, char *argv[])
 	if (port == 0) {
 		return -1;
 	}
+
+	signal(SIGINT, sigfunc);
 
 	pa_simple *rec = init_capture(rate, PA_SAMPLE_S16LE);
 	int err = 0;
@@ -235,23 +264,67 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	while (1) {
+	packet.start.hdr.magic = PACKET_MAGIC;
+	packet.start.hdr.packet_type = (uint8_t)PACKET_TYPE_START_STREAM;
+	packet.start.hdr.packet_len =
+	    sizeof(stream_start_t) + sizeof(packet_header_t);
+	packet.start.hdr.uid = packet_id++;
+
+	packet.start.meta.channels = NCHANNELS;
+	packet.start.meta.codec_type = (uint8_t)codec;
+	packet.start.meta.format = (uint8_t)PA_SAMPLE_S16LE;
+	packet.start.meta.rate = (uint32_t)rate;
+
+	if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
+		   (struct sockaddr *)&si_other, (socklen_t)slen) == -1) {
+		fprintf(stderr, "cannot send to socket\n");
+		exit(1);
+	}
+
+	while (do_capture) {
 		int encoded;
+		size_t offset = 0U;
 
 		pa_simple_read(rec, input_buffer, data_size, &err);
 
 		encoded = encode_frames(encoder, input_buffer, FRAMES_COUNT,
 					enc_buffer, enc_size);
 
-		if (encoded > 0) {
+		while (encoded > 0) {
+			uint16_t len = (uint16_t)encoded;
+			if (len > MAX_DATA_SIZE) {
+				len = MAX_DATA_SIZE;
+			}
+			packet.data.hdr.magic = PACKET_MAGIC;
+			packet.data.hdr.packet_type =
+			    (uint8_t)PACKED_TYPE_STREAM_DATA;
+			packet.data.hdr.packet_len =
+			    len + sizeof(packet_header_t);
+			packet.start.hdr.uid = packet_id++;
+
+			memcpy(packet.data.data, &enc_buffer[offset], len);
+			offset += len;
+			encoded -= len;
+
 			/* UDP send */
-			if (sendto(s, enc_buffer, (size_t)encoded, 0,
+			if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
 				   (struct sockaddr *)&si_other,
 				   (socklen_t)slen) == -1) {
 				fprintf(stderr, "cannot send to socket\n");
 				break;
 			}
 		}
+	}
+
+	packet.end.hdr.magic = PACKET_MAGIC;
+	packet.end.hdr.packet_type = (uint8_t)PACKET_TYPE_STOP_STREAM;
+	packet.end.hdr.packet_len = sizeof(packet_header_t);
+	packet.start.hdr.uid = packet_id++;
+
+	if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
+		   (struct sockaddr *)&si_other, (socklen_t)slen) == -1) {
+		fprintf(stderr, "cannot send to socket\n");
+		exit(1);
 	}
 
 	pa_simple_free(rec);

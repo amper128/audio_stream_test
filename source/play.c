@@ -16,19 +16,24 @@
 #include <string.h>
 #include <sys/poll.h>
 
+#include <streaming_shared.h>
+
 #define NSTREAMS (16U)
-#define NCHANNELS (2U)
 #define BUFSIZE (8192U)
 
-typedef enum {
-	CODEC_MP3, /* use lame */
-	CODEC_OPUS /* use opus */
-} codec_type_t;
+#define MAX_PACKET_SIZE (1400U)
 
 typedef struct {
 	void *decoder_p;
+	pa_simple *pulse_p;
 	codec_type_t codec_type;
+	uint8_t frame_size;
+	uint8_t channels;
+	uint8_t _reserved[1];
+	uint8_t skip_next;
 } decoder_desc_t;
+
+static int stream_started = 0;
 
 static pa_simple *
 init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
@@ -70,7 +75,7 @@ init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
 }
 
 static decoder_desc_t *
-init_decoder(int rate, codec_type_t codec)
+init_decoder(int rate, codec_type_t codec, int channels)
 {
 	switch (codec) {
 	default:
@@ -85,7 +90,7 @@ init_decoder(int rate, codec_type_t codec)
 		OpusDecoder *opus;
 		int err = 0;
 		/* Create a new decoder state. */
-		opus = opus_decoder_create(rate, 2, &err);
+		opus = opus_decoder_create(rate, channels, &err);
 		if (err < 0) {
 			fprintf(stderr, "failed to create decoder: %s\n",
 				opus_strerror(err));
@@ -147,24 +152,42 @@ decode_buffer(decoder_desc_t *decoder, uint8_t *buffer, size_t in_size,
 	return decoded;
 }
 
+static decoder_desc_t *
+stream_start(codec_type_t codec, int rate, pa_sample_format_t format,
+	     int channels, uint32_t prebuf)
+{
+	decoder_desc_t *decoder = init_decoder(rate, codec, channels);
+
+	if (decoder != NULL) {
+		decoder->pulse_p = init_playback(rate, format, prebuf);
+		if (decoder->pulse_p == NULL) {
+			free_decoder(decoder);
+			return NULL;
+		}
+
+		decoder->frame_size = (uint8_t)pa_sample_size_of_format(format);
+		decoder->channels = (uint8_t)channels;
+
+		int err = 0;
+		pa_simple_flush(decoder->pulse_p, &err);
+	}
+
+	return decoder;
+}
+
 int
 main(int argc, char *argv[])
 {
 	uint16_t port = 0U;
-	int rate = 48000;
+	// pa_sample_format_t format = PA_SAMPLE_S16LE;
 	uint32_t prebuf = 2U;
-	codec_type_t codec = CODEC_OPUS;
 
 	int c;
-	while ((c = getopt(argc, argv, "p:r:B:")) != -1) {
+	while ((c = getopt(argc, argv, "p:B:")) != -1) {
 		char *end;
 		switch (c) {
 		case 'p':
 			port = (uint16_t)strtoul(optarg, &end, 10);
-			break;
-
-		case 'r':
-			rate = (int)strtol(optarg, &end, 10);
 			break;
 
 		case 'B':
@@ -180,26 +203,21 @@ main(int argc, char *argv[])
 		return -1;
 	}
 
-	pa_simple *play = init_playback(rate, PA_SAMPLE_S16LE, prebuf);
+	// pa_simple *play = init_playback(rate, format, prebuf);
 	int err = 0;
-	size_t frame_size = pa_sample_size_of_format(PA_SAMPLE_S16LE);
-	size_t data_size = frame_size * 8192U;
+	// size_t frame_size = pa_sample_size_of_format(format);
+	// size_t data_size = frame_size * 8192U;
 
-	const size_t input_maxsize = 1024U;
-	unsigned char *input_buffer;
-
-	input_buffer = malloc(input_maxsize);
-
-	decoder_desc_t *decoder = init_decoder(rate, codec);
+	decoder_desc_t *decoder = NULL;
 
 	short int *pcm_buffer;
 
-	pcm_buffer = malloc(data_size);
+	pcm_buffer = malloc(8192U * sizeof(float) * 2U);
 
 	/* UDP init */
 	struct sockaddr_in sockaddr;
 	int sock;
-	socklen_t slen = sizeof(sockaddr);
+	// socklen_t slen = sizeof(sockaddr);
 	sockaddr.sin_family = AF_INET;
 	sockaddr.sin_port = htons(port);
 	sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -216,8 +234,8 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	int flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+	/*int flags = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, flags | O_NONBLOCK);*/
 
 	while (1) {
 		struct pollfd fds[2];
@@ -242,33 +260,126 @@ main(int argc, char *argv[])
 			continue;
 		}
 
-		ssize_t data_len =
-		    recvfrom(sock, input_buffer, input_maxsize, 0,
-			     (struct sockaddr *)&sockaddr, &slen);
-		if (data_len > 0) {
-			int decoded;
+		union {
+			uint8_t u8[MAX_PACKET_SIZE];
+			struct {
+				packet_header_t hdr;
+				stream_start_t meta;
+			} start;
+			struct {
+				packet_header_t hdr;
+			} end;
+			struct {
+				packet_header_t hdr;
+				uint8_t data[];
+			} data;
+		} packet;
 
-			decoded = decode_buffer(decoder, input_buffer,
-						(size_t)data_len, pcm_buffer,
-						BUFSIZE);
-			if (decoded > 0) {
-				decoded = pa_simple_write(
-				    play, pcm_buffer,
-				    ((size_t)decoded * frame_size * NCHANNELS),
-				    &err);
-				if (decoded < 0) {
-					fprintf(stderr, "pa_error\n");
+		ssize_t data_len =
+		    recv(sock, packet.u8, sizeof(packet_header_t), MSG_PEEK);
+		if (data_len > 0) {
+			if (packet.data.hdr.magic != PACKET_MAGIC) {
+				continue;
+			}
+
+			size_t offset = 0U;
+			size_t len = packet.data.hdr.packet_len;
+
+			do {
+				data_len =
+				    recv(sock, &packet.u8[offset], len, 0);
+
+				if (data_len < 0) {
+					fprintf(stderr, "cannot read socket\n");
+					break;
 				}
+
+				len -= (size_t)data_len;
+				offset += (size_t)data_len;
+			} while (len > 0U);
+
+			switch (packet.data.hdr.packet_type) {
+			case (uint8_t)PACKET_TYPE_START_STREAM:
+				if (stream_started > 0) {
+					pa_simple_free(decoder->pulse_p);
+					free_decoder(decoder);
+				}
+
+				decoder = stream_start(
+				    packet.start.meta.codec_type,
+				    (int)packet.start.meta.rate,
+				    (pa_sample_format_t)
+					packet.start.meta.format,
+				    packet.start.meta.channels, prebuf);
+
+				if (decoder != NULL) {
+					stream_started = 1;
+				}
+
+				break;
+
+			case (uint8_t)PACKET_TYPE_STOP_STREAM:
+				if (stream_started > 0) {
+					pa_simple_free(decoder->pulse_p);
+					free_decoder(decoder);
+					stream_started = 0;
+				}
+
+				break;
+
+			case (uint8_t)PACKED_TYPE_STREAM_DATA:
+				if (stream_started > 0) {
+					int decoded;
+
+					decoded = decode_buffer(
+					    decoder, packet.data.data,
+					    packet.data.hdr.packet_len -
+						sizeof(packet_header_t),
+					    pcm_buffer, BUFSIZE);
+
+					if (decoded <= 0) {
+						break;
+					}
+
+					if (decoder->skip_next > 0) {
+						decoder->skip_next = 0;
+						break;
+					}
+
+					size_t i;
+					for (i = 0U; i < (size_t)decoded;
+					     i += 4U) {
+						pcm_buffer[(i + 3) * 2] =
+						    pcm_buffer[(i + 1) * 2];
+						pcm_buffer[(i + 2) * 2] =
+						    pcm_buffer[(i)*2];
+					}
+
+					decoded = pa_simple_write(
+					    decoder->pulse_p, pcm_buffer,
+					    ((size_t)decoded *
+					     (size_t)decoder->frame_size *
+					     (size_t)decoder->channels),
+					    &err);
+					if (decoded < 0) {
+						fprintf(stderr, "pa_error\n");
+					}
+				}
+
+				break;
+
+			default:
+				break;
 			}
 		}
 	}
 
-	pa_simple_free(play);
+	if (stream_started > 0) {
+		pa_simple_free(decoder->pulse_p);
+		free_decoder(decoder);
+	}
 
-	free(input_buffer);
 	free(pcm_buffer);
-
-	free_decoder(decoder);
 
 	return 0;
 }
