@@ -190,13 +190,6 @@ main(int argc, char *argv[])
 		uint8_t u8[MAX_PACKET_SIZE];
 		struct {
 			packet_header_t hdr;
-			stream_start_t meta;
-		} start;
-		struct {
-			packet_header_t hdr;
-		} end;
-		struct {
-			packet_header_t hdr;
 			uint8_t data[];
 		} data;
 	} packet;
@@ -264,23 +257,6 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	packet.start.hdr.magic = PACKET_MAGIC;
-	packet.start.hdr.packet_type = (uint8_t)PACKET_TYPE_START_STREAM;
-	packet.start.hdr.packet_len =
-	    sizeof(stream_start_t) + sizeof(packet_header_t);
-	packet.start.hdr.uid = packet_id++;
-
-	packet.start.meta.channels = NCHANNELS;
-	packet.start.meta.codec_type = (uint8_t)codec;
-	packet.start.meta.format = (uint8_t)PA_SAMPLE_S16LE;
-	packet.start.meta.rate = (uint32_t)rate;
-
-	if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
-		   (struct sockaddr *)&si_other, (socklen_t)slen) == -1) {
-		fprintf(stderr, "cannot send to socket\n");
-		exit(1);
-	}
-
 	while (do_capture) {
 		int encoded;
 		size_t offset = 0U;
@@ -295,36 +271,28 @@ main(int argc, char *argv[])
 			if (len > MAX_DATA_SIZE) {
 				len = MAX_DATA_SIZE;
 			}
+
 			packet.data.hdr.magic = PACKET_MAGIC;
-			packet.data.hdr.packet_type =
-			    (uint8_t)PACKED_TYPE_STREAM_DATA;
+			packet.data.hdr.uid = packet_id++;
 			packet.data.hdr.packet_len =
 			    len + sizeof(packet_header_t);
-			packet.start.hdr.uid = packet_id++;
+			packet.data.hdr.codec_type = (uint8_t)codec;
+			packet.data.hdr.channels = NCHANNELS;
+			packet.data.hdr.format = (uint8_t)PA_SAMPLE_S16LE;
+			packet.data.hdr.rate = (uint32_t)rate;
 
 			memcpy(packet.data.data, &enc_buffer[offset], len);
 			offset += len;
 			encoded -= len;
 
 			/* UDP send */
-			if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
+			if (sendto(s, packet.u8, packet.data.hdr.packet_len, 0,
 				   (struct sockaddr *)&si_other,
 				   (socklen_t)slen) == -1) {
 				fprintf(stderr, "cannot send to socket\n");
 				break;
 			}
 		}
-	}
-
-	packet.end.hdr.magic = PACKET_MAGIC;
-	packet.end.hdr.packet_type = (uint8_t)PACKET_TYPE_STOP_STREAM;
-	packet.end.hdr.packet_len = sizeof(packet_header_t);
-	packet.start.hdr.uid = packet_id++;
-
-	if (sendto(s, packet.u8, packet.start.hdr.packet_len, 0,
-		   (struct sockaddr *)&si_other, (socklen_t)slen) == -1) {
-		fprintf(stderr, "cannot send to socket\n");
-		exit(1);
 	}
 
 	pa_simple_free(rec);

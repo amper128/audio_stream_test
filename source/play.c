@@ -7,10 +7,9 @@
  */
 
 #include <arpa/inet.h>
-#include <fcntl.h>
-#include <getopt.h>
 #include <lame/lame.h>
 #include <opus/opus.h>
+#include <pulse/error.h>
 #include <pulse/simple.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,8 +28,8 @@ typedef struct {
 	codec_type_t codec_type;
 	uint8_t frame_size;
 	uint8_t channels;
-	uint8_t _reserved[1];
-	uint8_t skip_next;
+	uint8_t _reserved[6];
+	uint32_t rate;
 } decoder_desc_t;
 
 static int stream_started = 0;
@@ -54,7 +53,7 @@ init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
 	buffer_attr.prebuf = prebuf;
 	buffer_attr.minreq = (uint32_t)-1;
 	buffer_attr.fragsize = 0;
-
+	int err = 0;
 	play = pa_simple_new(NULL,	  // Use the default server.
 			     "Test play", // Our application's name.
 			     PA_STREAM_PLAYBACK,
@@ -63,11 +62,11 @@ init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
 			     &ss,	   // Our sample format.
 			     NULL,	   // Use default channel map
 			     &buffer_attr, // Use default buffering attributes.
-			     NULL	   // Ignore error code.
-	);
+			     &err);
 
 	if (play == NULL) {
-		fprintf(stderr, "cannot create pulseaudio stream\n");
+		fprintf(stderr, "cannot create pulseaudio stream: %s\n",
+			pa_strerror(err));
 		exit(1);
 	}
 
@@ -167,6 +166,7 @@ stream_start(codec_type_t codec, int rate, pa_sample_format_t format,
 
 		decoder->frame_size = (uint8_t)pa_sample_size_of_format(format);
 		decoder->channels = (uint8_t)channels;
+		decoder->rate = (uint32_t)rate;
 
 		int err = 0;
 		pa_simple_flush(decoder->pulse_p, &err);
@@ -179,7 +179,6 @@ int
 main(int argc, char *argv[])
 {
 	uint16_t port = 0U;
-	// pa_sample_format_t format = PA_SAMPLE_S16LE;
 	uint32_t prebuf = 2U;
 
 	int c;
@@ -203,10 +202,7 @@ main(int argc, char *argv[])
 		return -1;
 	}
 
-	// pa_simple *play = init_playback(rate, format, prebuf);
 	int err = 0;
-	// size_t frame_size = pa_sample_size_of_format(format);
-	// size_t data_size = frame_size * 8192U;
 
 	decoder_desc_t *decoder = NULL;
 
@@ -257,18 +253,18 @@ main(int argc, char *argv[])
 
 		if (rc == 0) {
 			/* no data */
+			if (stream_started > 0) {
+				fprintf(stderr, "stop streaming\n");
+				pa_simple_free(decoder->pulse_p);
+				free_decoder(decoder);
+				decoder = NULL;
+				stream_started = 0;
+			}
 			continue;
 		}
 
 		union {
 			uint8_t u8[MAX_PACKET_SIZE];
-			struct {
-				packet_header_t hdr;
-				stream_start_t meta;
-			} start;
-			struct {
-				packet_header_t hdr;
-			} end;
 			struct {
 				packet_header_t hdr;
 				uint8_t data[];
@@ -298,78 +294,56 @@ main(int argc, char *argv[])
 				offset += (size_t)data_len;
 			} while (len > 0U);
 
-			switch (packet.data.hdr.packet_type) {
-			case (uint8_t)PACKET_TYPE_START_STREAM:
-				if (stream_started > 0) {
+			if (packet.data.hdr.magic != PACKET_MAGIC) {
+				continue;
+			}
+
+			if (decoder != NULL) {
+				if ((decoder->channels !=
+				     packet.data.hdr.channels) ||
+				    (decoder->rate != packet.data.hdr.rate) ||
+				    (decoder->codec_type !=
+				     packet.data.hdr.codec_type)) {
 					pa_simple_free(decoder->pulse_p);
 					free_decoder(decoder);
+					decoder = NULL;
 				}
+			}
 
+			if (decoder == NULL) {
 				decoder = stream_start(
-				    packet.start.meta.codec_type,
-				    (int)packet.start.meta.rate,
-				    (pa_sample_format_t)
-					packet.start.meta.format,
-				    packet.start.meta.channels, prebuf);
+				    packet.data.hdr.codec_type,
+				    (int)packet.data.hdr.rate,
+				    (pa_sample_format_t)packet.data.hdr.format,
+				    packet.data.hdr.channels, prebuf);
 
 				if (decoder != NULL) {
 					stream_started = 1;
 				}
+			}
 
-				break;
+			if (stream_started > 0) {
+				int decoded;
 
-			case (uint8_t)PACKET_TYPE_STOP_STREAM:
-				if (stream_started > 0) {
-					pa_simple_free(decoder->pulse_p);
-					free_decoder(decoder);
-					stream_started = 0;
+				decoded =
+				    decode_buffer(decoder, packet.data.data,
+						  packet.data.hdr.packet_len -
+						      sizeof(packet_header_t),
+						  pcm_buffer, BUFSIZE);
+
+				if (decoded <= 0) {
+					continue;
 				}
 
-				break;
-
-			case (uint8_t)PACKED_TYPE_STREAM_DATA:
-				if (stream_started > 0) {
-					int decoded;
-
-					decoded = decode_buffer(
-					    decoder, packet.data.data,
-					    packet.data.hdr.packet_len -
-						sizeof(packet_header_t),
-					    pcm_buffer, BUFSIZE);
-
-					if (decoded <= 0) {
-						break;
-					}
-
-					if (decoder->skip_next > 0) {
-						decoder->skip_next = 0;
-						break;
-					}
-
-					size_t i;
-					for (i = 0U; i < (size_t)decoded;
-					     i += 4U) {
-						pcm_buffer[(i + 3) * 2] =
-						    pcm_buffer[(i + 1) * 2];
-						pcm_buffer[(i + 2) * 2] =
-						    pcm_buffer[(i)*2];
-					}
-
-					decoded = pa_simple_write(
-					    decoder->pulse_p, pcm_buffer,
-					    ((size_t)decoded *
-					     (size_t)decoder->frame_size *
-					     (size_t)decoder->channels),
-					    &err);
-					if (decoded < 0) {
-						fprintf(stderr, "pa_error\n");
-					}
+				decoded = pa_simple_write(
+				    decoder->pulse_p, pcm_buffer,
+				    ((size_t)decoded *
+				     (size_t)decoder->frame_size *
+				     (size_t)decoder->channels),
+				    &err);
+				if (decoded < 0) {
+					fprintf(stderr, "pa_error\n");
 				}
-
-				break;
-
-			default:
-				break;
 			}
 		}
 	}

@@ -17,24 +17,12 @@ typedef enum {
 	CODEC_OPUS /* use opus */
 } codec_type_t;
 
-typedef enum {
-	PACKET_TYPE_START_STREAM = 0,
-	PACKET_TYPE_STOP_STREAM,
-	PACKED_TYPE_STREAM_DATA,
-} packet_type_t;
-
 typedef struct {
 	uint32_t magic;
-	uint8_t packet_type; /* aka packet_type_t */
-	uint8_t __reserved;
-	uint16_t packet_len;
 	uint32_t uid;
-} packet_header_t;
-
-typedef struct {
-	uint8_t codec_type;
+	uint16_t packet_len;
+	uint8_t codec_type : 4;
+	uint8_t channels : 4;
 	uint8_t format;
-	uint8_t channels;
-	uint8_t __reserved;
 	uint32_t rate;
-} stream_start_t;
+} packet_header_t;
