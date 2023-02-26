@@ -7,6 +7,7 @@
  */
 
 #include <arpa/inet.h>
+#include <getopt.h>
 #include <lame/lame.h>
 #include <opus/opus.h>
 #include <pulse/error.h>
