@@ -17,6 +17,8 @@
 
 #include <streaming_shared.h>
 
+#include <pulse_api.h>
+
 #define FRAMES_COUNT (480U)
 #define NSTREAMS (64U)
 #define NCHANNELS (2U)
@@ -38,47 +40,6 @@ sigfunc(int sig)
 	if (sig == SIGINT) {
 		do_capture = 0;
 	}
-}
-
-static pa_simple *
-init_capture(int rate, pa_sample_format_t format)
-{
-	static pa_buffer_attr buffer_attr;
-	pa_simple *rec;
-
-	pa_sample_spec ss;
-
-	ss.format = format;
-	ss.channels = NCHANNELS;
-	ss.rate = (uint32_t)rate;
-
-	/* exactly space for the entire play time */
-	buffer_attr.maxlength =
-	    (uint32_t)((size_t)rate * sizeof(float) * NSTREAMS);
-	buffer_attr.tlength = (uint32_t)-1;
-	/* Setting prebuf to 0 guarantees us the streams will run synchronously,
-	 * no matter what */
-	buffer_attr.prebuf = 0;
-	buffer_attr.minreq = (uint32_t)-1;
-	buffer_attr.fragsize = 0;
-
-	rec = pa_simple_new(NULL,	    // Use the default server.
-			    "Test capture", // Our application's name.
-			    PA_STREAM_RECORD,
-			    NULL,	  // Use the default device.
-			    "Music",	  // Description of our stream.
-			    &ss,	  // Our sample format.
-			    NULL,	  // Use default channel map
-			    &buffer_attr, // Use default buffering attributes.
-			    NULL	  // Ignore error code.
-	);
-
-	if (rec == NULL) {
-		fprintf(stderr, "cannot create pulseaudio capture\n");
-		exit(1);
-	}
-
-	return rec;
 }
 
 static encoder_desc_t *
@@ -151,10 +112,11 @@ free_encoder(encoder_desc_t *encoder)
 }
 
 static int
-encode_frames(encoder_desc_t *encoder, int16_t *buffer, size_t frames,
+encode_frames(encoder_desc_t *encoder, void *buffer, size_t frames,
 	      uint8_t *out, size_t out_max)
 {
 	int encoded;
+	int16_t *buffer_i = buffer;
 
 	switch (encoder->codec_type) {
 	default:
@@ -162,14 +124,14 @@ encode_frames(encoder_desc_t *encoder, int16_t *buffer, size_t frames,
 		lame_t lame = (lame_t)encoder->encoder_p;
 
 		encoded = lame_encode_buffer_interleaved(
-		    lame, buffer, (int)frames, out, (int)out_max);
+		    lame, buffer_i, (int)frames, out, (int)out_max);
 
 	} break;
 
 	case CODEC_OPUS: {
 		OpusEncoder *opus = encoder->encoder_p;
 
-		encoded = opus_encode(opus, buffer, (int)frames, out,
+		encoded = opus_encode(opus, buffer_i, (int)frames, out,
 				      (opus_int32)out_max);
 	} break;
 	}
@@ -225,9 +187,15 @@ main(int argc, char *argv[])
 
 	signal(SIGINT, sigfunc);
 
-	pa_simple *rec = init_capture(rate, PA_SAMPLE_S16LE);
-	int err = 0;
-	int16_t *input_buffer;
+	pulse_t pulse;
+	if (pulse_open(&pulse, (uint32_t)rate, PA_SAMPLE_S16LE, NCHANNELS,
+		       "Test capture")) {
+		return 1;
+	}
+
+	// pa_simple *rec = init_capture(rate, PA_SAMPLE_S16LE);
+	// int err = 0;
+	uint8_t *input_buffer;
 	size_t frame_size = pa_sample_size_of_format(PA_SAMPLE_S16LE);
 	size_t data_size = frame_size * FRAMES_COUNT * NCHANNELS;
 
@@ -235,6 +203,13 @@ main(int argc, char *argv[])
 	unsigned char *enc_buffer;
 
 	input_buffer = malloc(data_size * 8);
+
+	uint8_t *ring_buffer;
+	size_t ring_head = 0U;
+	size_t ring_tail = 0U;
+	size_t ring_size = data_size * 8U;
+	ring_buffer = malloc(data_size * 8);
+
 	enc_buffer = malloc(enc_size * 8);
 
 	encoder_desc_t *encoder = init_encoder(rate, kbitrate, codec);
@@ -258,46 +233,80 @@ main(int argc, char *argv[])
 	}
 
 	while (do_capture) {
-		int encoded;
-		size_t offset = 0U;
+		size_t r;
 
-		pa_simple_read(rec, input_buffer, data_size, &err);
+		const void *pulse_buffer = NULL;
+		if (pulse_read_packet(&pulse, &pulse_buffer, &r)) {
+			exit(1);
+		}
 
-		encoded = encode_frames(encoder, input_buffer, FRAMES_COUNT,
-					enc_buffer, enc_size);
-
-		while (encoded > 0) {
-			uint16_t len = (uint16_t)encoded;
-			if (len > MAX_DATA_SIZE) {
-				len = MAX_DATA_SIZE;
+		if (pulse_buffer != NULL) {
+			const uint8_t *pb = pulse_buffer;
+			size_t copy1 = ring_size - ring_head;
+			if (copy1 > r) {
+				copy1 = r;
 			}
+			memcpy(&ring_buffer[ring_head], pb, copy1);
+			ring_head += copy1;
+			ring_head %= ring_size;
+			r -= copy1;
 
-			packet.data.hdr.magic = PACKET_MAGIC;
-			packet.data.hdr.uid = packet_id++;
-			packet.data.hdr.packet_len =
-			    len + sizeof(packet_header_t);
-			packet.data.hdr.codec_type = (uint8_t)codec;
-			packet.data.hdr.channels = NCHANNELS;
-			packet.data.hdr.format = (uint8_t)PA_SAMPLE_S16LE;
-			packet.data.hdr.rate = (uint32_t)rate;
+			if (r > 0) {
+				memcpy(ring_buffer, &pb[copy1], r);
+				ring_head += r;
+			}
+		}
 
-			memcpy(packet.data.data, &enc_buffer[offset], len);
-			offset += len;
-			encoded -= len;
+		while ((ring_head - ring_tail) % ring_size >=
+		       (FRAMES_COUNT * frame_size * NCHANNELS)) {
+			int encoded;
+			size_t offset = 0U;
 
-			/* UDP send */
-			if (sendto(s, packet.u8, packet.data.hdr.packet_len, 0,
-				   (struct sockaddr *)&si_other,
-				   (socklen_t)slen) == -1) {
-				fprintf(stderr, "cannot send to socket\n");
-				break;
+			encoded =
+			    encode_frames(encoder, &ring_buffer[ring_tail],
+					  FRAMES_COUNT, enc_buffer, enc_size);
+
+			ring_tail += (FRAMES_COUNT * frame_size * NCHANNELS);
+			ring_tail %= ring_size;
+
+			while (encoded > 0) {
+				uint16_t len = (uint16_t)encoded;
+				if (len > MAX_DATA_SIZE) {
+					len = MAX_DATA_SIZE;
+				}
+
+				packet.data.hdr.magic = PACKET_MAGIC;
+				packet.data.hdr.uid = packet_id++;
+				packet.data.hdr.packet_len =
+				    len + sizeof(packet_header_t);
+				packet.data.hdr.codec_type = (uint8_t)codec;
+				packet.data.hdr.channels = NCHANNELS;
+				packet.data.hdr.format =
+				    (uint8_t)PA_SAMPLE_S16LE;
+				packet.data.hdr.rate = (uint32_t)rate;
+
+				memcpy(packet.data.data, &enc_buffer[offset],
+				       len);
+				offset += len;
+				encoded -= len;
+
+				/* UDP send */
+				if (sendto(s, packet.u8,
+					   packet.data.hdr.packet_len, 0,
+					   (struct sockaddr *)&si_other,
+					   (socklen_t)slen) == -1) {
+					fprintf(stderr,
+						"cannot send to socket\n");
+					break;
+				}
 			}
 		}
 	}
 
-	pa_simple_free(rec);
+	pulse_close(&pulse);
 
 	free(input_buffer);
+	free(ring_buffer);
 	free(enc_buffer);
 
 	free_encoder(encoder);
