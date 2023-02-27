@@ -20,8 +20,6 @@
 
 #include <pulse_api.h>
 
-#define NSTREAMS (64U)
-
 static void
 context_state_cb(pa_context *c, void *userdata)
 {
@@ -57,7 +55,7 @@ stream_state_cb(pa_stream *s, void *userdata)
 }
 
 static void
-stream_request_cb(pa_stream *s, size_t length, void *userdata)
+stream_read_cb(pa_stream *s, size_t length, void *userdata)
 {
 	(void)s;
 	(void)length;
@@ -65,6 +63,32 @@ stream_request_cb(pa_stream *s, size_t length, void *userdata)
 	pulse_t *p = userdata;
 
 	pa_threaded_mainloop_signal(p->mainloop, 0);
+}
+
+static void
+stream_write_cb(pa_stream *s, size_t length, void *userdata)
+{
+	(void)s;
+	(void)length;
+
+	pulse_t *p = userdata;
+
+	pa_threaded_mainloop_signal(p->mainloop, 0);
+}
+
+static void
+stream_underflow_cb(pa_stream *s, void *userdata)
+{
+	(void)s;
+	(void)userdata;
+	fprintf(stderr, "Got underflow\n");
+}
+static void
+stream_overflow_cb(pa_stream *s, void *userdata)
+{
+	(void)s;
+	(void)userdata;
+	fprintf(stderr, "Got overflow\n");
 }
 
 static void
@@ -147,16 +171,19 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 	pd->stream_name = name;
 	const pa_sample_spec ss = {format, pd->sample_rate, pd->channels};
 
+	const pa_usec_t buffer_length_msec = 10;
 	pa_buffer_attr buffer_attr;
 	/* exactly space for the entire play time */
 	buffer_attr.maxlength =
-	    (uint32_t)((size_t)rate * sizeof(float) * NSTREAMS);
-	buffer_attr.tlength = (uint32_t)-1;
+	    (uint32_t)(pa_usec_to_bytes(1000UL * buffer_length_msec, &ss));
+	buffer_attr.tlength =
+	    (uint32_t)(pa_usec_to_bytes(1000UL * buffer_length_msec, &ss));
 	/* Setting prebuf to 0 guarantees us the streams will run synchronously,
 	 * no matter what */
 	buffer_attr.prebuf = 0;
 	buffer_attr.minreq = (uint32_t)-1;
-	buffer_attr.fragsize = 0;
+	buffer_attr.fragsize =
+	    pa_usec_to_bytes(1000UL * buffer_length_msec, &ss);
 
 	if (!(pd->mainloop = pa_threaded_mainloop_new())) {
 		pulse_close(pd);
@@ -199,10 +226,13 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 	    pd->stream, (pa_stream_notify_cb_t)stream_state_cb, pd);
 	pa_threaded_mainloop_unlock(pd->mainloop);
 
-	pa_stream_set_read_callback(pd->stream, stream_request_cb, pd);
-	pa_stream_set_write_callback(pd->stream, stream_request_cb, pd);
+	pa_stream_set_read_callback(pd->stream, stream_read_cb, pd);
+	pa_stream_set_write_callback(pd->stream, stream_write_cb, pd);
 	pa_stream_set_latency_update_callback(pd->stream,
 					      stream_latency_update_cb, pd);
+
+	pa_stream_set_underflow_callback(pd->stream, stream_underflow_cb, pd);
+	pa_stream_set_overflow_callback(pd->stream, stream_overflow_cb, pd);
 
 	context_poll_unless(pd->mainloop, pd->context, PA_CONTEXT_READY);
 
@@ -215,6 +245,8 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 
 	if (ret < 0) {
 		ret = pa_context_errno(pd->context);
+		fprintf(stderr, "cannot pa_stream_connect_record: %s\n",
+			pa_strerror(ret));
 		goto unlock_and_fail;
 	}
 

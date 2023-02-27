@@ -7,6 +7,7 @@
  */
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <lame/lame.h>
 #include <opus/opus.h>
@@ -36,7 +37,8 @@ typedef struct {
 static int stream_started = 0;
 
 static pa_simple *
-init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
+init_playback(int rate, pa_sample_format_t format, uint8_t channels,
+	      uint32_t prebuf)
 {
 	static pa_buffer_attr buffer_attr;
 	pa_simple *play;
@@ -44,7 +46,7 @@ init_playback(int rate, pa_sample_format_t format, uint32_t prebuf)
 	pa_sample_spec ss;
 
 	ss.format = format;
-	ss.channels = 2;
+	ss.channels = channels;
 	ss.rate = (uint32_t)rate;
 
 	/* exactly space for the entire play time */
@@ -159,7 +161,8 @@ stream_start(codec_type_t codec, int rate, pa_sample_format_t format,
 	decoder_desc_t *decoder = init_decoder(rate, codec, channels);
 
 	if (decoder != NULL) {
-		decoder->pulse_p = init_playback(rate, format, prebuf);
+		decoder->pulse_p =
+		    init_playback(rate, format, channels, prebuf);
 		if (decoder->pulse_p == NULL) {
 			free_decoder(decoder);
 			return NULL;
@@ -214,7 +217,6 @@ main(int argc, char *argv[])
 	/* UDP init */
 	struct sockaddr_in sockaddr;
 	int sock;
-	// socklen_t slen = sizeof(sockaddr);
 	sockaddr.sin_family = AF_INET;
 	sockaddr.sin_port = htons(port);
 	sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -231,8 +233,8 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	/*int flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, flags | O_NONBLOCK);*/
+	int flags = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
 	while (1) {
 		struct pollfd fds[2];
@@ -320,6 +322,7 @@ main(int argc, char *argv[])
 
 				if (decoder != NULL) {
 					stream_started = 1;
+					fprintf(stderr, "start streaming\n");
 				}
 			}
 
