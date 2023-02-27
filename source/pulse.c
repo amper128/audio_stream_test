@@ -77,6 +77,38 @@ stream_latency_update_cb(pa_stream *s, void *userdata)
 	pa_threaded_mainloop_signal(p->mainloop, 0);
 }
 
+static void
+context_poll_unless(pa_threaded_mainloop *pa, pa_context *ctx,
+		    pa_context_state_t state)
+{
+	for (;;) {
+		pa_context_state_t s;
+		pa_threaded_mainloop_lock(pa);
+		s = pa_context_get_state(ctx);
+		pa_threaded_mainloop_unlock(pa);
+		if (s == state) {
+			break;
+		}
+		pa_threaded_mainloop_wait(pa);
+	}
+}
+
+static void
+stream_poll_unless(pa_threaded_mainloop *pa, pa_stream *stream,
+		   pa_stream_state_t state)
+{
+	for (;;) {
+		pa_stream_state_t s;
+		pa_threaded_mainloop_lock(pa);
+		s = pa_stream_get_state(stream);
+		pa_threaded_mainloop_unlock(pa);
+		if (s == state) {
+			break;
+		}
+		pa_threaded_mainloop_wait(pa);
+	}
+}
+
 int
 pulse_close(pulse_t *pd)
 {
@@ -113,7 +145,6 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 	pd->channels = channels;
 	pd->name = name;
 	pd->stream_name = name;
-	pd->server = NULL;
 	const pa_sample_spec ss = {format, pd->sample_rate, pd->channels};
 
 	pa_buffer_attr buffer_attr;
@@ -132,56 +163,51 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 		return 1;
 	}
 
-	if (!(pd->context = pa_context_new(
-		  pa_threaded_mainloop_get_api(pd->mainloop), pd->name))) {
+	if (pa_threaded_mainloop_start(pd->mainloop) < 0) {
 		pulse_close(pd);
 		return 1;
 	}
 
-	pa_context_set_state_callback(pd->context, context_state_cb, pd);
+	pa_mainloop_api *api = pa_threaded_mainloop_get_api(pd->mainloop);
 
-	if (pa_context_connect(pd->context, pd->server, 0, NULL) < 0) {
+	if (!(pd->context = pa_context_new(api, pd->name))) {
 		pulse_close(pd);
-		return pa_context_errno(pd->context);
+		return 1;
 	}
 
 	pa_threaded_mainloop_lock(pd->mainloop);
-
-	if (pa_threaded_mainloop_start(pd->mainloop) < 0) {
-		ret = -1;
-		goto unlock_and_fail;
-	}
-
-	for (;;) {
-		pa_context_state_t state;
-
-		state = pa_context_get_state(pd->context);
-
-		if (state == PA_CONTEXT_READY) {
-			break;
-		}
-
-		if (!PA_CONTEXT_IS_GOOD(state)) {
-			ret = pa_context_errno(pd->context);
-			goto unlock_and_fail;
-		}
-
-		/* Wait until the context is ready */
-		pa_threaded_mainloop_wait(pd->mainloop);
-	}
-
-	if (!(pd->stream =
-		  pa_stream_new(pd->context, pd->stream_name, &ss, NULL))) {
+	if (pa_context_connect(pd->context, NULL, 0, NULL) < 0) {
+		pulse_close(pd);
 		ret = pa_context_errno(pd->context);
 		goto unlock_and_fail;
 	}
 
-	pa_stream_set_state_callback(pd->stream, stream_state_cb, pd);
+	pa_context_set_state_callback(pd->context, context_state_cb, pd);
+	pa_threaded_mainloop_unlock(pd->mainloop);
+
+	context_poll_unless(pd->mainloop, pd->context, PA_CONTEXT_READY);
+
+	// stream create
+	pa_threaded_mainloop_lock(pd->mainloop);
+	pd->stream = pa_stream_new(pd->context, pd->stream_name, &ss, NULL);
+	if (!pd->stream) {
+		ret = pa_context_errno(pd->context);
+		goto unlock_and_fail;
+	}
+
+	pa_stream_set_state_callback(
+	    pd->stream, (pa_stream_notify_cb_t)stream_state_cb, pd);
+	pa_threaded_mainloop_unlock(pd->mainloop);
+
 	pa_stream_set_read_callback(pd->stream, stream_request_cb, pd);
 	pa_stream_set_write_callback(pd->stream, stream_request_cb, pd);
 	pa_stream_set_latency_update_callback(pd->stream,
 					      stream_latency_update_cb, pd);
 
+	context_poll_unless(pd->mainloop, pd->context, PA_CONTEXT_READY);
+
+	// stream connect
+	pa_threaded_mainloop_lock(pd->mainloop);
 	ret = pa_stream_connect_record(pd->stream, device, &buffer_attr,
 				       PA_STREAM_INTERPOLATE_TIMING |
 					   PA_STREAM_ADJUST_LATENCY |
@@ -192,25 +218,10 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 		goto unlock_and_fail;
 	}
 
-	for (;;) {
-		pa_stream_state_t state;
-
-		state = pa_stream_get_state(pd->stream);
-
-		if (state == PA_STREAM_READY) {
-			break;
-		}
-
-		if (!PA_STREAM_IS_GOOD(state)) {
-			ret = pa_context_errno(pd->context);
-			goto unlock_and_fail;
-		}
-
-		/* Wait until the stream is ready */
-		pa_threaded_mainloop_wait(pd->mainloop);
-	}
-
 	pa_threaded_mainloop_unlock(pd->mainloop);
+
+	context_poll_unless(pd->mainloop, pd->context, PA_CONTEXT_READY);
+	stream_poll_unless(pd->mainloop, pd->stream, PA_STREAM_READY);
 
 	return 0;
 
@@ -242,7 +253,7 @@ pulse_read_packet(pulse_t *pd, const void **data, size_t *size)
 
 		r = pa_stream_peek(pd->stream, data, &read_length);
 		if (r != 0) {
-			ret = 1;
+			ret = pa_context_errno(pd->context);
 			goto unlock_and_fail;
 		}
 
@@ -254,23 +265,20 @@ pulse_read_packet(pulse_t *pd, const void **data, size_t *size)
 			    !pd->stream ||
 			    !PA_STREAM_IS_GOOD(
 				pa_stream_get_state(pd->stream))) {
-				ret = 1;
+				ret = pa_context_errno(pd->context);
 				goto unlock_and_fail;
 			}
-		} else if (!data) {
+		} else if (!(*data)) {
 			/* There's a hole in the stream, skip it. We could
 			 * generate silence, but that wouldn't work for
 			 * compressed streams. */
 			r = pa_stream_drop(pd->stream);
 			if (r != 0) {
-				ret = 1;
+				ret = pa_context_errno(pd->context);
 				goto unlock_and_fail;
 			}
 		}
 	}
-
-	pa_operation_unref(
-	    pa_stream_update_timing_info(pd->stream, NULL, NULL));
 
 	*size = read_length;
 	pa_stream_drop(pd->stream);

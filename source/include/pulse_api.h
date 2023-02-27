@@ -13,7 +13,6 @@
 #include <pulse/pulseaudio.h>
 
 typedef struct {
-	const char *server;
 	const char *name;
 	const char *stream_name;
 	uint32_t sample_rate;

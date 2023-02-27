@@ -236,7 +236,10 @@ main(int argc, char *argv[])
 		size_t r;
 
 		const void *pulse_buffer = NULL;
-		if (pulse_read_packet(&pulse, &pulse_buffer, &r)) {
+		int err = pulse_read_packet(&pulse, &pulse_buffer, &r);
+		if (err != 0) {
+			fprintf(stderr, "cannot read pulseaudio stream: %s\n",
+				pa_strerror(err));
 			exit(1);
 		}
 
