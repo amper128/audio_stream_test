@@ -207,8 +207,8 @@ main(int argc, char *argv[])
 	uint8_t *ring_buffer;
 	size_t ring_head = 0U;
 	size_t ring_tail = 0U;
-	size_t ring_size = data_size * 8U;
-	ring_buffer = malloc(data_size * 8);
+	size_t ring_size = data_size * 32U;
+	ring_buffer = malloc(ring_size);
 
 	enc_buffer = malloc(enc_size * 8);
 

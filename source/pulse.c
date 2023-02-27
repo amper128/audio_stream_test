@@ -182,8 +182,11 @@ pulse_open(pulse_t *pd, uint32_t rate, pa_sample_format_t format,
 	 * no matter what */
 	buffer_attr.prebuf = 0;
 	buffer_attr.minreq = (uint32_t)-1;
-	buffer_attr.fragsize =
-	    pa_usec_to_bytes(1000UL * buffer_length_msec, &ss);
+	/*buffer_attr.fragsize =
+	    pa_usec_to_bytes(1000UL * buffer_length_msec, &ss);*/
+	/* очень важная цифра, если меньше - растет использование цпу и, как ни
+	 * странно, задержка */
+	buffer_attr.fragsize = 8192;
 
 	if (!(pd->mainloop = pa_threaded_mainloop_new())) {
 		pulse_close(pd);
